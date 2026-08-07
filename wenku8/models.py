@@ -115,3 +115,55 @@ class BookshelfItem:
     last_updated: str
     finished: bool
     updated_after_last_reading: bool
+
+
+@dataclass
+class NovelCover:
+    """列表/推荐/他人书架中的轻量书籍封面条目。"""
+    title: str
+    aid: int
+    image_url: Optional[str] = None
+
+
+@dataclass
+class CommentItem:
+    """书评条目。"""
+    rid: int
+    content: str
+    view_count: str
+    reply_count: str
+    user_name: str
+    uid: int
+    time: str
+
+
+@dataclass
+class ReplyItem:
+    """书评的回复条目。"""
+    content: str
+    user_name: str
+    uid: int
+    time: str
+
+
+@dataclass
+class RecommendBlock:
+    """首页推荐区块。"""
+    title: str
+    list: list[NovelCover]
+
+
+@dataclass
+class UserInfo:
+    """当前登录用户详情。"""
+    avatar: str
+    uid: int
+    username: str
+    user_level: str
+    email: str
+    register_date: str
+    contribution: str
+    experience: str
+    point: str
+    max_bookshelf_num: str
+    max_recommend_num: str

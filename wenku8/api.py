@@ -11,7 +11,7 @@ from lxml import etree
 
 from wenku8.consts import LoginValidity, Lang, SearchMethod, NovelSortMethod
 from wenku8.exceptions import NotLoggedInException, CloudflareChallengeException, PageParseError, RateLimitException
-from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem
+from wenku8.models import NovelInfo, _Volume, _Chapter, NovelIndex, SearchItem, SearchResult, PageControl, BookshelfItem, NovelCover, CommentItem, ReplyItem, RecommendBlock, UserInfo
 from wenku8.utils import extract_text, cooldown, separate_chinese_colon, get_chapter_content, lang_convent
 
 
@@ -507,4 +507,305 @@ class Wenku8API:
                                          bookmark_cid=bookmark_cid, last_updated=novel[5].text.strip(),
                                          finished=finished, updated_after_last_reading=updated_after_last_reading))
 
+        return lang_convent(results, lang)
+
+    # ---- 以下为迁移自 hikari_novel_flutter 的 GET 功能（第一批）----
+
+    @staticmethod
+    def _is_error_page(html: str) -> bool:
+        """检测 wenku8 操作错误页（.blocktitle 文本为「出现错误！」/「出現錯誤！」）。"""
+        parser = etree.HTML(html)
+        titles = parser.xpath('//*[contains(@class,"blocktitle")]/text()')
+        if not titles:
+            return False
+        return "".join(titles).strip() in ("出现错误！", "出現錯誤！")
+
+    @staticmethod
+    def _block_content_text(
+            html: str,
+            xpath: str = '//*[contains(@class,"blockcontent")]//div[@style="padding:10px"]') -> str:
+        """提取操作提示页 .blockcontent 内的提示文本；错误页抛 PageParseError。"""
+        if Wenku8API._is_error_page(html):
+            raise PageParseError("操作失败，wenku8 返回错误页", html, xpath=xpath)
+        parser = etree.HTML(html)
+        nodes = parser.xpath(xpath)
+        if not nodes:
+            return ""
+        return "".join(nodes[0].itertext()).strip()
+
+    @staticmethod
+    def _parse_recommend_items(items) -> list[NovelCover]:
+        """从推荐区块的封面 div 列表提取 NovelCover。"""
+        result = []
+        for j in items:
+            a_tags = j.xpath('./a')
+            img_tags = j.xpath('.//img')
+            if len(a_tags) < 2 or not img_tags:
+                continue
+            title = (a_tags[1].text or "").strip()
+            img = img_tags[0].get("src") or ""
+            if img and not img.startswith("https"):
+                img = img.replace("http", "https", 1)
+            url = a_tags[0].get("href") or ""
+            aid = 0
+            if "book/" in url and ".htm" in url:
+                try:
+                    aid = int(url[url.find("book/") + 5:url.find(".htm")])
+                except ValueError:
+                    aid = 0
+            result.append(NovelCover(title=title, aid=aid, image_url=img))
+        return result
+
+    @login_required
+    async def get_novel_by_category(self, tag: str, sort: str, page: int = 1,
+                                    lang: Lang = Lang.zh_CN) -> SearchResult:
+        """按分类(tag)获取小说列表。sort 为 wenku8 排序键（如 lastupdate/allvisit）。"""
+        tag = lang_convent(tag, Lang.zh_CN)
+        encoded = quote(tag.encode('gbk'))
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/tags.php?t={encoded}&v={sort}&page={page}&charset=gbk")
+        parser = etree.HTML(html)
+        return lang_convent(self._search_page_parser(html, parser), lang)
+
+    def _card_list_parser(self, html: str, parser) -> SearchResult:
+        """解析 articlelist 等页面的 373px 卡片列表（每张卡片含封面/书名/作者/字数/状态/标签/简介）。"""
+        cards = parser.xpath('//div[contains(@style,"width:373px")]')
+        if not cards:
+            raise PageParseError("卡片列表页缺少 373px 卡片", html,
+                                 xpath='//div[contains(@style,"width:373px")]')
+        results = []
+        for card in cards:
+            a_tags = card.xpath('.//a')
+            if not a_tags:
+                continue
+            aid_match = re.search(r'/book/(\d+)\.htm', a_tags[0].get("href", ""))
+            if not aid_match:
+                continue
+            aid = int(aid_match.group(1))
+            title_a = card.xpath('.//b/a')
+            title = (title_a[0].text or "").strip() if title_a else ""
+            if not title:
+                title = a_tags[0].get("tiptitle", "") or ""
+            author = press = last_updated = word_count = status = ""
+            tags: list[str] = []
+            intro_preview = ""
+            for p_el in card.xpath('.//p'):
+                txt = "".join(p_el.itertext()).strip().replace("：", ":")
+                if txt.startswith("作者:"):
+                    parts = txt.split("/")
+                    author = parts[0].split(":", 1)[1] if ":" in parts[0] else ""
+                    if len(parts) > 1:
+                        press = parts[1].split(":", 1)[1] if ":" in parts[1] else parts[1]
+                elif txt.startswith("更新:"):
+                    parts = txt.split("/")
+                    last_updated = parts[0].split(":", 1)[1] if ":" in parts[0] else ""
+                    if len(parts) > 1:
+                        word_count = parts[1].split(":", 1)[1] if ":" in parts[1] else ""
+                    status = parts[2] if len(parts) > 2 else ""
+                elif txt.startswith("Tags:"):
+                    tags_text = txt[5:].strip()
+                    tags = tags_text.split(" ") if tags_text else []
+                elif txt.startswith("简介:"):
+                    intro_preview = txt[3:].strip()
+            results.append(SearchItem(
+                aid=aid, title=title, author=author, press=press,
+                last_updated=last_updated, word_count=word_count, status=status,
+                tags=tags, intro_preview=intro_preview,
+                copyright=True, animation=False))
+        ps_nodes = parser.xpath('//*[@id="pagestats"]/text()')
+        if not ps_nodes or not ps_nodes[0].strip():
+            raise PageParseError("卡片列表页缺少 #pagestats", html, xpath='//*[@id="pagestats"]')
+        return SearchResult(results=results, page_control=PageControl.from_str(ps_nodes[0]))
+
+    @login_required
+    async def get_finished_novels(self, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
+        """获取已完结小说列表。"""
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/articlelist.php?fullflag=1&page={page}&charset=gbk")
+        parser = etree.HTML(html)
+        return lang_convent(self._card_list_parser(html, parser), lang)
+
+    @login_required
+    async def add_to_bookshelf(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
+        """加入书架，返回页面提示文本。"""
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/addbookcase.php?bid={aid}&charset=gbk")
+        return lang_convent(self._block_content_text(html), lang)
+
+    @login_required
+    async def remove_from_bookshelf(self, bid: int) -> bool:
+        """从书架移除（bid 为该书在书架中的 id）。
+
+        delid 后 wenku8 重定向到用户中心页（无明确提示文本），故不返回提示，
+        仅在出现错误页时抛 PageParseError，否则返回 True。
+        """
+        # bookcase.php 不支持 charset 参数（见 get_bookshelf，commit 42dad78）
+        html = await self._navigate(self.ENDPOINT + f"/modules/article/bookcase.php?delid={bid}")
+        if self._is_error_page(html):
+            raise PageParseError("移除书架失败，wenku8 返回错误页", html)
+        return True
+
+    @login_required
+    async def vote_novel(self, aid: int, lang: Lang = Lang.zh_CN) -> str:
+        """为小说投票，返回页面提示文本。"""
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/uservote.php?id={aid}&charset=gbk")
+        return lang_convent(self._block_content_text(html), lang)
+
+    @login_required
+    async def get_user_bookshelf(self, uid: int, lang: Lang = Lang.zh_CN) -> list[NovelCover]:
+        """获取其他用户收藏的书籍。"""
+        html = await self._navigate(self.ENDPOINT + f"/userpage.php?uid={uid}&charset=gbk")
+        parser = etree.HTML(html)
+        trs = parser.xpath('//*[@id="centerm"]//tr')
+        if not trs:
+            raise PageParseError("他人书架页面缺少 #centerm", html, xpath='//*[@id="centerm"]//tr')
+        results = []
+        for tr in trs[1:]:  # 跳过表头行
+            anchors = tr.xpath('.//a')
+            if len(anchors) < 2:
+                continue
+            title = (anchors[0].text or "").strip()
+            bid_match = re.search(r'bid=(\d+)', anchors[1].get("href", ""))
+            if not bid_match:
+                continue
+            results.append(NovelCover(title=title, aid=int(bid_match.group(1))))
+        return lang_convent(results, lang)
+
+    @login_required
+    async def get_comments(self, aid: int, page: int = 1,
+                           lang: Lang = Lang.zh_CN) -> list[CommentItem]:
+        """获取书籍评论区。"""
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/reviews.php?aid={aid}&page={page}&charset=gbk")
+        parser = etree.HTML(html)
+        tables = parser.xpath('//*[@id="content"]//table')
+        if not tables:
+            raise PageParseError("评论页面缺少 #content", html, xpath='//*[@id="content"]//table')
+        if len(tables) < 3:
+            raise PageParseError("评论页面 table 数量不足", html, xpath='//*[@id="content"]//table')
+        results = []
+        for tr in tables[2].xpath('./tr'):
+            if tr.get("align"):
+                continue
+            tds = tr.xpath('./td')
+            if len(tds) < 4:
+                continue
+            a0 = tds[0].xpath('./a')
+            if not a0:
+                continue
+            rid_match = re.search(r'rid=(\d+)', a0[0].get("href", ""))
+            rid = int(rid_match.group(1)) if rid_match else 0
+            content = (a0[0].text or "").strip()
+            view_reply = (tds[1].text or "").strip()
+            idx = view_reply.find('/')
+            reply_count = view_reply[:idx] if idx > 0 else ""
+            view_count = view_reply[idx + 1:] if idx >= 0 else ""
+            a2 = tds[2].xpath('./a')
+            user_name = (a2[0].text or "").strip() if a2 else ""
+            uid_match = re.search(r'uid=(\d+)', a2[0].get("href", "")) if a2 else None
+            uid = int(uid_match.group(1)) if uid_match else 0
+            time_str = (tds[3].text or "").strip()
+            results.append(CommentItem(
+                rid=rid, content=content, view_count=view_count, reply_count=reply_count,
+                user_name=user_name, uid=uid, time=time_str))
+        return lang_convent(results, lang)
+
+    @login_required
+    async def get_replies(self, rid: int, page: int = 1,
+                          lang: Lang = Lang.zh_CN) -> list[ReplyItem]:
+        """获取书评的回复列表。"""
+        html = await self._navigate(
+            self.ENDPOINT + f"/modules/article/reviewshow.php?rid={rid}&page={page}&charset=gbk")
+        parser = etree.HTML(html)
+        if not parser.xpath('//*[@id="content"]'):
+            raise PageParseError("回复页面缺少 #content", html, xpath='//*[@id="content"]')
+        tables = parser.xpath('//*[@id="content"]//table')
+        results = []
+        # 跳过前 3 后 2（对应 hikari: count<4 continue / count==N-1 break）
+        for table in tables[3:-2] if len(tables) > 5 else []:
+            # 用 .//td 而非 ./td：_strip_tbody 后结构为 table>tr>td，td 非直接子节点
+            tds = table.xpath('.//td')
+            if len(tds) < 2:
+                continue
+            user_link = tds[0].xpath('.//a')
+            user_name = (user_link[0].text or "").strip() if user_link else ""
+            uid_match = re.search(r'uid=(\d+)', user_link[0].get("href", "")) if user_link else None
+            uid = int(uid_match.group(1)) if uid_match else 0
+            divs = tds[1].xpath('.//div')
+            raw_time = ""
+            if len(divs) > 1:
+                raw_time = "".join(divs[1].itertext()).strip()
+                pipe_idx = raw_time.find('|')
+                if pipe_idx > 0:
+                    raw_time = raw_time[:pipe_idx - 1].strip()
+            content = ""
+            if len(divs) > 2:
+                content = "".join(divs[2].itertext()).strip()
+            results.append(ReplyItem(content=content, user_name=user_name, uid=uid, time=raw_time))
+        return lang_convent(results, lang)
+
+    @login_required
+    async def get_user_info(self, lang: Lang = Lang.zh_CN) -> UserInfo:
+        """获取当前登录用户详情。"""
+        html = await self._navigate(self.ENDPOINT + "/userdetail.php?charset=gbk")
+        parser = etree.HTML(html)
+        tables = parser.xpath('//*[@id="content"]//table')
+        if not tables:
+            raise PageParseError("用户信息页面缺少 #content//table",
+                                 html, xpath='//*[@id="content"]//table')
+        rows = tables[0].xpath('.//tr')
+
+        def cell(row_idx: int, td_idx: int) -> str:
+            if row_idx >= len(rows):
+                return ""
+            tds = rows[row_idx].xpath('./td')
+            if td_idx >= len(tds):
+                return ""
+            return "".join(tds[td_idx].itertext()).strip()
+
+        avatar = ""
+        if rows:
+            imgs = rows[0].xpath('./td[3]//img')
+            if imgs:
+                avatar = (imgs[0].get("src") or "").replace("https", "http")
+        uid_str = cell(0, 1)
+        email = ""
+        if len(rows) > 7:
+            a = rows[7].xpath('.//a')
+            if a:
+                email = (a[0].text or "").strip()
+        return lang_convent(UserInfo(
+            avatar=avatar,
+            uid=int(uid_str) if uid_str.isdigit() else 0,
+            username=cell(2, 1),
+            user_level=cell(4, 1),
+            email=email,
+            register_date=cell(12, 1),
+            contribution=cell(13, 1),
+            experience=cell(14, 1),
+            point=cell(15, 1),
+            max_bookshelf_num=cell(18, 1),
+            max_recommend_num=cell(19, 1)), lang)
+
+    @login_required
+    async def get_recommend(self, lang: Lang = Lang.zh_CN) -> list[RecommendBlock]:
+        """获取首页推荐区块。"""
+        html = await self._navigate(self.ENDPOINT + "/index.php?charset=gbk")
+        parser = etree.HTML(html)
+        if not parser.xpath('//*[@id="centers"]'):
+            raise PageParseError("推荐页面缺少 #centers", html, xpath='//*[@id="centers"]')
+        results = []
+        # 精确匹配 class="block"，避免误匹配 blockcontent/blocktitle（含后者的元素无推荐项）
+        blocks = parser.xpath(
+            '//*[@id="centers"]//div[contains(concat(" ",normalize-space(@class)," ")," block ")]')
+        for block in blocks:
+            items = block.xpath(
+                './/div[@style="float: left;text-align:center;width: 95px; height:155px;overflow:hidden;"]')
+            if not items:
+                continue
+            title = "".join(block.xpath('.//div[contains(@class,"blocktitle")]/text()')).strip()
+            if title:
+                title = title.split("(")[0].strip()
+            results.append(RecommendBlock(title=title, list=self._parse_recommend_items(items)))
         return lang_convent(results, lang)

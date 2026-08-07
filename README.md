@@ -12,17 +12,20 @@
   - 获取内容 (`get_novel_content`)
   - 搜索小说（书名/作者）(`search_novel/search_novel_by_name/search_novel_by_author`)
   - 获取小说列表 (`get_novel_list`)
-  - 搜索小说（TAG）(*TODO*)
-  - 收藏小说 (*TODO*)
-  - 推荐小说 (*TODO*)
+  - 按分类(TAG)查看 (`get_novel_by_category`)
+  - 获取已完结列表 (`get_finished_novels`)
+  - 加入/移出书架 (`add_to_bookshelf`/`remove_from_bookshelf`)
+  - 获取他人书架 (`get_user_bookshelf`)
+  - 推荐小说/获取推荐 (`vote_novel`/`get_recommend`)
 - 用户部分
   - 登录 (`login`)
   - 获取书架 (`get_bookshelf`)
-  - 获取个人信息 (*TODO*)
-- 评论部分 (*TODO*)
-  - 获取书评
-  - 发表书评
-  - 回复书评
+  - 获取个人信息 (`get_user_info`)
+- 评论部分
+  - 获取书评 (`get_comments`)
+  - 获取回复 (`get_replies`)
+  - 发表书评 (*TODO*)
+  - 回复书评 (*TODO*)
 - 杂项
   - 简繁转换
 
