@@ -1,6 +1,6 @@
 # pywenku8api
 
-此项目提供基于[轻小说文库（Wenku8）](https://www.wenku8.net)网页版的API实现，可绕过其 Cloudflare 防火墙与官方 API 的限制。
+此项目提供基于[轻小说文库（Wenku8）](https://www.wenku8.cc)网页版的 API 实现。普通页面使用常驻 HTTP 客户端并发抓取；只有登录或 HTTP 遇到可解决的 Cloudflare 质询时才启动 Chromium。
 
 为支持 [Wenku8-OPDS](https://github.com/WorldObservationLog/wenku8-opds-readme) 而开发
 
@@ -33,3 +33,17 @@
 - 可能会绕不过 Cloudflare 防火墙
 - 版权书目无法阅读
 - 日本 IP 无法使用
+
+## 内存缓存
+
+常用的详情、目录、章节、整本、搜索和列表结果使用进程内加权 LRU 缓存；相同
+cache key 的并发 miss 会合并为一次上游抓取。缓存默认最多占用 64 MiB，图片不进入
+服务端缓存，大正文过期后也不会在后台同时保留新旧两份。
+
+FastAPI 服务可通过 `WENKU8_CACHE_MEMORY_MB` 调整上限，例如在内存紧张时设置为
+`32`；设置为 `0` 可关闭结果缓存（相同并发请求的 singleflight 合并仍然有效）。
+`GET /cache/status` 可查看命中次数、估算内存占用和正在抓取的请求数。
+
+默认节点为 `https://www.wenku8.cc`，只读请求遇到连接、5xx、限流或 CF 问题时会自动尝试 `.net`；可用
+`WENKU8_ENDPOINT` 显式指定首选节点。HTTP 429 仅按 `Retry-After`（最多 5 秒）
+重试一次，正常搜索没有固定冷却等待。加入/移除书架和投票不会跨节点重放。

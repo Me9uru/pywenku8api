@@ -7,10 +7,10 @@ class RateLimitException(Exception):
 
 
 class CloudflareChallengeException(Exception):
-    """CDN 资源被 Cloudflare 防火墙拦截，返回质询页而非目标内容。
+    """HTTP 请求被 Cloudflare 质询页拦截。
 
-    当前策略：检测到即抛错，不尝试用浏览器完成质询（httpx 的 TLS 指纹与
-    真实浏览器不同，质询也无法可靠通过）。
+    HTML 主路径会捕获此异常并用浏览器兜底；CDN 二进制路径无法可靠地把
+    浏览器质询结果转换成原始资源响应，因此将异常交给调用方。
     """
 
 
@@ -26,3 +26,8 @@ class PageParseError(Exception):
         self.xpath = xpath
         detail = html[:2000] if html else "(无页面内容)"
         super().__init__(f"{message} [xpath={xpath or 'N/A'}] 页面片段: {detail}")
+
+
+class InvalidUrlError(Exception):
+    """传入的 URL 非法或不在允许域内（如 get_picture 的 SSRF 防护白名单）。"""
+    pass

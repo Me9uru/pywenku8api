@@ -16,6 +16,8 @@ httpx = { version = "^0.28.1", extras = ["socks"] }
 
 [tool.poetry.group.dev.dependencies]
 python-dotenv = "^1.2.1"
+fastapi = "^0.115"
+uvicorn = { version = "^0.30", extras = ["standard"] }
 
 [build-system]
 requires = ["poetry-core"]
