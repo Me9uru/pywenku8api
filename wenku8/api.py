@@ -642,6 +642,26 @@ class Wenku8API:
         page_control_str = pagestats_nodes[0].text
         return SearchResult(results=results, page_control=PageControl.from_str(page_control_str))
 
+    @staticmethod
+    def _single_search_result_aid(parser: lxml.html.Element) -> int | None:
+        """按 hikari_novel_flutter 的详情页 DOM 判断单条搜索结果。"""
+        if parser is None:
+            return None
+        containers = parser.xpath(
+            '//*[@id="content"]//div['
+            'contains(@style,"margin:0px auto") and contains(@style,"overflow:hidden")]'
+        )
+        if not containers:
+            return None
+        spans = containers[0].xpath('.//span')
+        if len(spans) < 2:
+            return None
+        for href in spans[1].xpath('.//a[@href]/@href'):
+            bid = parse_qs(urlparse(href).query).get("bid")
+            if bid and bid[0].isdigit():
+                return int(bid[0])
+        return None
+
     @login_required
     async def search_novel(self, keyword: str, method: SearchMethod, page: int = 1,
                            lang: Lang = Lang.zh_CN) -> SearchResult:
@@ -655,12 +675,25 @@ class Wenku8API:
 
     async def _search_novel_uncached(self, keyword: str, method: SearchMethod,
                                      page: int) -> SearchResult:
-        html, final_url = await self._navigate(
-            self.ENDPOINT + f"/modules/article/search.php?searchtype={method}&searchkey={quote(keyword.encode('gbk'))}&page={page}",
-            want_url=True)
-        if final_url.endswith(".htm"):  # 只有一个结果时会跳转到对应的页面
+        search_url = (
+            self.ENDPOINT
+            + f"/modules/article/search.php?searchtype={method}"
+              f"&searchkey={quote(keyword.encode('gbk'))}&page={page}&charset=gbk"
+        )
+        html, final_url = await self._navigate(search_url, want_url=True)
+        # Wenku8 currently returns HTTP 200 + a tiny ``<h1>Welcome</h1>`` page
+        # to non-browser search requests. Retry the same URL in Chromium.
+        if self._is_welcome_placeholder(html):
+            html, final_url = await self._navigate_browser(search_url, want_url=True)
+        if self._is_error_page(html):
+            raise RateLimitException("搜索过于频繁，Wenku8 返回错误页")
+        parser = etree.HTML(html)
+        # Hikari 同时检查详情页 DOM；浏览器/上游不一定把最终书页 URL 暴露出来。
+        redirect_match = re.search(r'(?:^|/)(\d+)\.htm$', urlparse(final_url).path)
+        aid = int(redirect_match.group(1)) if redirect_match else self._single_search_result_aid(parser)
+        if aid is not None:
             info = await self.get_novel_info(
-                re.search(r"(\d*).htm", final_url).group(1), lang=Lang.zh_CN
+                aid, lang=Lang.zh_CN
             )
             return lang_convent(SearchResult(
                 results=[SearchItem(aid=info.aid, title=info.title, author=info.author, press=info.press,
@@ -668,9 +701,8 @@ class Wenku8API:
                                     status=info.status, tags=info.tags, intro_preview=info.intro,
                                     copyright=info.copyright, animation=info.animation)],
                 page_control=PageControl(now=1, previous=1, next=1, begin=1, end=1)), Lang.zh_CN)
-        else:
-            parser = etree.HTML(html)
-            return lang_convent(self._search_page_parser(html, parser), Lang.zh_CN)
+        return lang_convent(
+            self._card_list_parser(html, parser, page=page, allow_empty=True), Lang.zh_CN)
 
     async def search_novel_by_name(self, keyword: str, page: int = 1, lang: Lang = Lang.zh_CN):
         return await self.search_novel(keyword, SearchMethod.NAME, page, lang)
@@ -776,6 +808,15 @@ class Wenku8API:
         return "".join(titles).strip() in ("出现错误！", "出現錯誤！")
 
     @staticmethod
+    def _is_welcome_placeholder(html: str) -> bool:
+        """Detect the HTTP-only placeholder returned for valid search URLs."""
+        parser = etree.HTML(html)
+        if parser is None:
+            return False
+        body_text = " ".join(parser.xpath("string(//body)").split())
+        return body_text == "Welcome" and not parser.xpath('//*[@id="content"]')
+
+    @staticmethod
     def _block_content_text(
             html: str,
             xpath: str = '//*[contains(@class,"blockcontent")]//div[@style="padding:10px"]') -> str:
@@ -835,25 +876,50 @@ class Wenku8API:
         parser = etree.HTML(html)
         return lang_convent(self._search_page_parser(html, parser), Lang.zh_CN)
 
-    def _card_list_parser(self, html: str, parser) -> SearchResult:
-        """解析 articlelist 等页面的 373px 卡片列表（每张卡片含封面/书名/作者/字数/状态/标签/简介）。"""
-        cards = parser.xpath('//div[contains(@style,"width:373px")]')
+    def _card_list_parser(self, html: str, parser, *, page: int = 1,
+                          allow_empty: bool = False) -> SearchResult:
+        """解析 Hikari 使用的 373x136px 小说卡片列表。"""
+        cards = parser.xpath(
+            '//*[@id="content"]//div[contains(@style,"width:373px") '
+            'and contains(@style,"height:136px")]'
+        )
         if not cards:
+            # 搜索无结果仍有 #content；异常页/占位页没有，不能误报为空结果。
+            if allow_empty and parser.xpath('//*[@id="content"]'):
+                control = PageControl(now=page, previous=max(1, page - 1),
+                                      next=page, begin=1, end=page)
+                return SearchResult(results=[], page_control=control)
             raise PageParseError("卡片列表页缺少 373px 卡片", html,
-                                 xpath='//div[contains(@style,"width:373px")]')
+                                 xpath='//*[@id="content"]//div[contains(@style,"width:373px")]')
         results = []
         for card in cards:
-            a_tags = card.xpath('.//a')
+            a_tags = card.xpath('.//a[@href]')
             if not a_tags:
                 continue
-            aid_match = re.search(r'/book/(\d+)\.htm', a_tags[0].get("href", ""))
-            if not aid_match:
+            detail_link = None
+            aid = None
+            for candidate in a_tags:
+                href = candidate.get("href", "")
+                aid_match = re.search(r'/book/(\d+)\.htm', href)
+                if aid_match:
+                    detail_link = candidate
+                    aid = int(aid_match.group(1))
+                    break
+                query_aid = parse_qs(urlparse(href).query).get("aid")
+                if query_aid and query_aid[0].isdigit():
+                    detail_link = candidate
+                    aid = int(query_aid[0])
+                    break
+            if detail_link is None or aid is None:
                 continue
-            aid = int(aid_match.group(1))
+            # Hikari 直接取卡片首个链接的 title；其余分支兼容旧页面。
+            title = detail_link.get("title", "").strip()
             title_a = card.xpath('.//b/a')
-            title = (title_a[0].text or "").strip() if title_a else ""
+            if not title and title_a:
+                title = "".join(title_a[0].itertext()).strip()
             if not title:
-                title = a_tags[0].get("tiptitle", "") or ""
+                title = (detail_link.get("tiptitle", "")
+                         or "".join(detail_link.itertext()).strip())
             author = press = last_updated = word_count = status = ""
             tags: list[str] = []
             intro_preview = ""
@@ -861,15 +927,18 @@ class Wenku8API:
                 txt = "".join(p_el.itertext()).strip().replace("：", ":")
                 if txt.startswith("作者:"):
                     parts = txt.split("/")
-                    author = parts[0].split(":", 1)[1] if ":" in parts[0] else ""
+                    author = parts[0].split(":", 1)[1].strip() if ":" in parts[0] else ""
                     if len(parts) > 1:
-                        press = parts[1].split(":", 1)[1] if ":" in parts[1] else parts[1]
+                        press = (parts[1].split(":", 1)[1] if ":" in parts[1]
+                                 else parts[1]).strip()
                 elif txt.startswith("更新:"):
                     parts = txt.split("/")
-                    last_updated = parts[0].split(":", 1)[1] if ":" in parts[0] else ""
+                    last_updated = (parts[0].split(":", 1)[1].strip()
+                                    if ":" in parts[0] else "")
                     if len(parts) > 1:
-                        word_count = parts[1].split(":", 1)[1] if ":" in parts[1] else ""
-                    status = parts[2] if len(parts) > 2 else ""
+                        word_count = (parts[1].split(":", 1)[1]
+                                      if ":" in parts[1] else parts[1]).strip()
+                    status = parts[2].strip() if len(parts) > 2 else ""
                 elif txt.startswith("Tags:"):
                     tags_text = txt[5:].strip()
                     tags = tags_text.split(" ") if tags_text else []
@@ -882,10 +951,28 @@ class Wenku8API:
                 last_updated=last_updated, word_count=word_count, status=status,
                 tags=tags, intro_preview=intro_preview,
                 copyright=True, animation=False))
-        ps_nodes = parser.xpath('//*[@id="pagestats"]/text()')
-        if not ps_nodes or not ps_nodes[0].strip():
-            raise PageParseError("卡片列表页缺少 #pagestats", html, xpath='//*[@id="pagestats"]')
-        return SearchResult(results=results, page_control=PageControl.from_str(ps_nodes[0]))
+        ps_nodes = parser.xpath('//*[@id="pagestats"]')
+        if ps_nodes:
+            stats = "".join(ps_nodes[0].itertext()).strip()
+            if stats:
+                return SearchResult(
+                    results=results, page_control=PageControl.from_str(stats))
+
+        # 当前 Hikari 通过 class=last 的数字获取最大页，而不是依赖 #pagestats。
+        page_numbers = [page]
+        for node in parser.xpath(
+                '//*[contains(concat(" ",normalize-space(@class)," ")," last ")]'):
+            value = "".join(node.itertext()).strip()
+            if value.isdigit():
+                page_numbers.append(int(value))
+        for href in parser.xpath('//*[@id="content"]//a[@href]/@href'):
+            value = parse_qs(urlparse(href).query).get("page")
+            if value and value[0].isdigit():
+                page_numbers.append(int(value[0]))
+        end = max(page_numbers)
+        control = PageControl(now=page, previous=max(1, page - 1),
+                              next=min(page + 1, end), begin=1, end=end)
+        return SearchResult(results=results, page_control=control)
 
     @login_required
     async def get_finished_novels(self, page: int = 1, lang: Lang = Lang.zh_CN) -> SearchResult:
