@@ -1,24 +1,25 @@
-[tool.poetry]
+[project]
 name = "pywenku8api"
 version = "0.1.0"
-description = ""
-authors = ["世界观察日志 <wolchannel@proton.me>"]
+description = "Async Wenku8 client and FastAPI service with HTTP-first Cloudflare fallback"
 readme = "README.md"
-packages = [
-    { include = "wenku8" }
+requires-python = ">=3.11,<4"
+authors = [
+    { name = "世界观察日志", email = "wolchannel@proton.me" },
+]
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx[socks]>=0.28.1,<0.29",
+    "lxml>=6.0.2,<7",
+    "python-dotenv>=1.2.1,<2",
+    "uvicorn[standard]>=0.30,<1",
+    "zendriver>=0.15.3,<0.16",
 ]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-lxml = "^6.0.2"
-zendriver = "^0.15.3"
-httpx = { version = "^0.28.1", extras = ["socks"] }
-
-[tool.poetry.group.dev.dependencies]
-python-dotenv = "^1.2.1"
-fastapi = "^0.115"
-uvicorn = { version = "^0.30", extras = ["standard"] }
-
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.11.0,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "wenku8"
+module-root = ""

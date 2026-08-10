@@ -7,7 +7,7 @@
 并发：普通 HTML、CDN/二进制和缓存路径均可并发；只有 Chromium 兜底导航串行。
 HTTP 429 会遵循 Retry-After（最多 5 秒）重试一次，不对正常搜索施加固定等待。
 
-运行：`poetry run python -m wenku8.server`
+运行：`env DISPLAY=:0 WENKU8_HEADLESS=0 .venv/bin/python -m wenku8.server`
 监听：`WENKU8_HOST`（默认 127.0.0.1）/ `WENKU8_PORT`（默认 8000）
 文档：`/docs`
 """

@@ -10,14 +10,15 @@ Known limitations: Cloudflare bypass can fail; copyrighted books are unreadable;
 
 ## Commands
 
-Poetry project (Python 3.11+). No test suite exists.
+uv project (Python 3.11+). `uv.lock` is the only dependency lockfile.
 
 ```bash
-poetry install                # install deps (zendriver will fetch Chromium on first use)
-poetry run python -c "..."    # run any snippet
+uv sync --locked
+.venv/bin/python -m unittest discover -s tests -v
+env DISPLAY=:0 WENKU8_HEADLESS=0 .venv/bin/python -m wenku8.server
 ```
 
-Local dev uses a `.env` (gitignored) loaded via `python-dotenv` with `WENKU8_USERNAME` / `WENKU8_PASSWORD` for ad-hoc testing against the live site. `WENKU8_ENDPOINT` selects the preferred node for the FastAPI service (default `.cc`). `WENKU8_HEADLESS` (truthy default / `0`|`false`|`no`|`off`|`headed` → headed) switches the browser mode when `Wenku8API(headless=...)` is not passed explicitly; headed mode needs an X display (see the `DISPLAY` check in `_ensure_browser`).
+Local dev uses a `.env` (gitignored) loaded via `python-dotenv` with `WENKU8_USERNAME` / `WENKU8_PASSWORD` for ad-hoc testing against the live site. `WENKU8_ENDPOINT` selects the preferred node for the FastAPI service (default `.cc`). `WENKU8_HEADLESS` (truthy default / `0`|`false`|`no`|`off`|`headed` → headed) switches the browser mode when `Wenku8API(headless=...)` is not passed explicitly; headed mode needs an X display. The normal local command explicitly uses `DISPLAY=:0` and `WENKU8_HEADLESS=0`; on a server without a real display, use `xvfb-run -a` instead.
 
 ## Architecture
 

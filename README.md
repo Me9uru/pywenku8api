@@ -4,6 +4,44 @@
 
 为支持 [Wenku8-OPDS](https://github.com/WorldObservationLog/wenku8-opds-readme) 而开发
 
+## 安装与运行
+
+项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python、虚拟环境和依赖，唯一锁文件为
+`uv.lock`。安装 uv 后，在项目目录同步环境：
+
+```bash
+uv sync --locked
+```
+
+本地图形桌面环境下，推荐使用有头 Chromium 运行：
+
+```bash
+env DISPLAY=:0 WENKU8_HEADLESS=0 .venv/bin/python -m wenku8.server
+```
+
+无桌面的服务器可以先尝试无头模式：
+
+```bash
+env WENKU8_HEADLESS=1 .venv/bin/python -m wenku8.server
+```
+
+如果服务器上的无头 Chromium 无法通过登录或 Cloudflare 质询，安装 Xvfb 后使用
+虚拟桌面运行：
+
+```bash
+env WENKU8_HEADLESS=0 xvfb-run -a \
+  -s "-screen 0 1280x1024x24" \
+  .venv/bin/python -m wenku8.server
+```
+
+更新部署时使用锁文件同步，然后重启服务：
+
+```bash
+git pull --ff-only
+uv sync --locked --no-editable
+sudo systemctl restart pywenku8api
+```
+
 ## 功能列表
 - 小说部分
   - 获取信息 (`get_novel_info`)
